@@ -1,0 +1,237 @@
+---
+title: "Machine learning with IMDB"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+library(caret)
+library(tidytext)
+library(splitstackshape)
+library(doParallel)
+library(rpart)
+```
+
+```{r}
+data <- read_csv("data/movies.csv")
+```
+
+# EDA
+
+Do score distributions differ between IMDB and Metacritic.
+
+```{r}
+data %>% drop_na(Metascore) %>% mutate(Score = Score *10) %>% gather("score_type", "score", Score, Metascore) %>% 
+  ggplot(aes(x = score)) +
+  geom_density() +
+  facet_wrap(~ score_type, ncol = 1)
+```
+
+Are genres scored differently?
+
+```{r}
+data_genre <- data %>% separate_rows(Genre, sep = ", ")
+
+data_genre %>% 
+  ggplot(aes(x = fct_reorder(Genre, Score), y = Score)) +
+  geom_boxplot() +
+  coord_flip() +
+  xlab("")
+```
+
+```{r}
+data_genre %>% drop_na(Metascore) %>%
+  ggplot(aes(x = fct_reorder(Genre, Metascore), y = Metascore)) +
+  geom_boxplot() +
+  coord_flip() +
+  xlab("") +
+  ylab("Metascore")
+```
+
+Do some genres get more votes?
+
+```{r}
+data_genre %>% group_by(Genre) %>% summarise(n = n()) %>%
+  ggplot(aes(x = fct_reorder(Genre, n), y = n)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  xlab("") +
+  ylab("Number of Films")
+```
+
+
+Do scores change with year of release?
+
+```{r}
+data %>% ggplot(aes(x = factor(Year), y = Score)) +
+  geom_boxplot()
+```
+
+```{r}
+data %>% drop_na(Metascore) %>%
+  ggplot(aes(x = factor(Year), y = Metascore)) +
+  geom_boxplot()
+```
+
+```{r}
+data %>% ggplot(aes(x = Vote, y = Score)) +
+  geom_point(alpha = 0.2)
+```
+
+```{r}
+data %>%  drop_na(Metascore) %>% 
+  ggplot(aes(x = Score, y = Metascore)) +
+  geom_jitter(alpha = 0.2)
+```
+
+How do words in the description influence score?
+
+```{r}
+data_desc <- data %>% separate_rows(Description, sep = " ")
+
+# Remove "." and ","
+data_desc$Description <- gsub("\\.|,", "", data_desc$Description)
+data_desc$Description <- ifelse(data_desc$Description == "", NA, data_desc$Description)
+data_desc <- data_desc %>% drop_na(Description)
+
+# Change all words to lower (no duplicates for sentence start words)
+data_desc$Description <- tolower(data_desc$Description)
+```
+
+The data is now pretty clean. I'm going to want to know which words are associated with good movies in
+the description. I'm going to want to minimise the influence of individual movies,
+therefore I'm going to want to have general words, not names referring to specific movies.
+I'll play around with the cutoff.
+
+```{r}
+data_desc %>% count(Description) %>% arrange(desc(n))
+```
+
+Upper cutoff: NA
+Lower cutoff: 20
+
+```{r}
+data_desc %>% filter(Description %in% c("his", "her", "boy", "girl", "man", "woman")) %>% group_by(Description) %>%
+  summarise(n = n(), mean_score = mean(Score), median_score = median(Score))
+```
+
+```{r}
+data_desc_cut <- data_desc %>% group_by(Description) %>% summarise(n = n()) %>% filter(n > 29)
+data_desc_cutoff <- data_desc %>% semi_join(data_desc_cut)
+
+data_desc_cutoff %>% group_by(Description) %>% summarise(n = n(), mean_score = mean(Score), median_score = median(Score)) %>% 
+  arrange(desc(mean_score))
+```
+
+Question: How negative are the words in the descriptions? Are negative words associated more with higher score.
+I'll use the BING dictionary for this purpose.
+
+```{r}
+bing <- sentiments %>% filter(lexicon == "bing")
+bing <- bing %>% rename(Description = word)
+
+data_desc_sent <- data_desc %>% inner_join(bing)
+```
+
+What is the ratio of positive and negative words?
+
+```{r}
+data_desc_sent %>% group_by(sentiment) %>% summarise(n = n(), mean_score = mean(Score)) 
+```
+According to BING, there are twice as many negative words than positive. How does this compare to BING's ratio?
+The negative, positive word association is not significant I don't think. Therefore, it doesn't matter
+if negative or positive words are used in the description by and large.
+
+```{r}
+bing %>% group_by(sentiment) %>% summarise(n = n())
+```
+There are actually twice as many negative words than positive. This is indeed tricky to tell.
+
+Do genres have a different ratio of positive and negative words?
+
+```{r}
+data_desc_sent %>% separate_rows(Genre, sep = ", ") %>% group_by(Genre, sentiment) %>% summarise(n = n(), mean_score = mean(Score))
+```
+
+In Thrillers, Sport and Sci-Fi movies the score appears to be positively associated with positive words.
+
+# Machine Learning
+
+Ok, here's the idea. How well can you predict Metacritic scores of films that don't have a Metacritic score?
+
+```{r}
+train <- data_genre %>% drop_na(Metascore) %>% spread(Genre, Genre) %>% select(-Description, -Title, -Rank, -Director)
+
+genres <- train[, 7:27]
+
+genres[!is.na(genres)] <- 1
+genres[is.na(genres)] <- 0
+genres <- as.data.frame(unclass(genres))
+
+train <- cbind(train[,1:6], genres)
+```
+This works absolutely great. Amazing stuff.
+
+Ok, the director won't go there because if a new director comes up, they won't
+be properly regressed.
+
+```{r}
+train_rand <- slice(train, sample(1:n()))
+
+train_x <- train_rand %>% select(-Metascore)
+train_y <- train_rand$Metascore
+```
+
+Time to train the model.
+
+```{r}
+pproc <- preProcess(train_x,
+                      method = "knnImpute")
+
+train_x <- predict(pproc, train_x)
+# It centered and scaled my variables. It should be fine.
+
+# Parallel computing setup
+workers <- makeCluster(detectCores(), type = "SOCK")
+registerDoParallel(workers)
+
+rf_model <- train(train_x[,1:5], train_y,
+                    method = "rf",
+                    #tuneLength = 1,
+                    verbose = T,
+                    trControl = trainControl(method = "cv", number = 5))
+
+rf_model
+```
+MAE of 9.52. I am not very satisfied with this.
+
+```{r}
+ref <- train %>% select(Score, Metascore) %>% mutate(Score = Score * 10)
+MAE(ref$Score, ref$Metascore)
+```
+
+```{r}
+RMSE(ref$Score, ref$Metascore)
+```
+These two are the baseline results, assuming that the metascore is the same as the IMDB score.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
