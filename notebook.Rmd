@@ -202,15 +202,43 @@ workers <- makeCluster(detectCores(), type = "SOCK")
 registerDoParallel(workers)
 #stopImplicitCluster()
 
-
 xgb_model <- train(train_x, train_y,
                     method = "xgbTree",
-                    tuneLength = 3,
+                    tuneLength = 10,
                     #verbose = T,
                     trControl = trainControl(method = "cv", number = 10))
 
 xgb_model$results %>% arrange(MAE)
 ```
+```{r}
+# Getting the test data ready
+test <- data_genre[is.na(data_genre$Metascore),]
+
+test <- test %>% spread(Genre, Genre)
+titles <- test$Title
+test <- test %>% select(-Description, -Title, -Rank, -Director)
+
+genres_test <- test[, 7:27]
+genres_test[!is.na(genres_test)] <- 1
+genres_test[is.na(genres_test)] <- 0
+genres_test <- as.data.frame(unclass(genres_test))
+
+test <- cbind(test[,1:6], genres_test)
+test <- test %>% select(-Metascore)
+
+test <- test %>% mutate_if(is.factor, as.character)
+test <- test %>% mutate_if(is.character, as.numeric)
+
+test$Metascore <- predict(xgb_model, test)
+test$title <- titles
+
+test <- test %>% select(title, Score, Metascore, everything())
+write_csv(test, "output.csv")
+```
+
+
+
+
 I think this is the best I can do with this dataset. Another idea is to think about the director variable somehow. But associating the director variable with things
 would cause problems with the cross-validation. I need to think about this in a bit more detail.
 
