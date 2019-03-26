@@ -8,6 +8,7 @@ library(tidyverse)
 library(caret)
 library(tidytext)
 library(splitstackshape)
+library(xgboost)
 library(doParallel)
 library(rpart)
 ```
@@ -186,24 +187,38 @@ Time to train the model.
 
 ```{r}
 pproc <- preProcess(train_x,
-                      method = "knnImpute")
+                      method = "medianImpute")
 
 train_x <- predict(pproc, train_x)
 # It centered and scaled my variables. It should be fine.
 
+#cols_to_remove <- nearZeroVar(train_x)
+#train_x <- train_x[,-cols_to_remove]
+train_x <- train_x %>% mutate_if(is.factor, as.character)
+train_x <- train_x %>% mutate_if(is.character, as.numeric)
+
 # Parallel computing setup
 workers <- makeCluster(detectCores(), type = "SOCK")
 registerDoParallel(workers)
+#stopImplicitCluster()
 
-rf_model <- train(train_x[,1:5], train_y,
-                    method = "rf",
-                    #tuneLength = 1,
-                    verbose = T,
-                    trControl = trainControl(method = "cv", number = 5))
 
-rf_model
+xgb_model <- train(train_x, train_y,
+                    method = "xgbTree",
+                    tuneLength = 3,
+                    #verbose = T,
+                    trControl = trainControl(method = "cv", number = 10))
+
+xgb_model$results %>% arrange(MAE)
 ```
-MAE of 9.52. I am not very satisfied with this.
+I think this is the best I can do with this dataset. Another idea is to think about the director variable somehow. But associating the director variable with things
+would cause problems with the cross-validation. I need to think about this in a bit more detail.
+
+```{r}
+varImp(xgb_model)
+```
+Any other metadata from films would be great to get predictive power. Here is the part where I would think about what types of additional data sources 
+and variables would improve model performance.
 
 ```{r}
 ref <- train %>% select(Score, Metascore) %>% mutate(Score = Score * 10)
