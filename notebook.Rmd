@@ -3,14 +3,18 @@ title: "Machine learning with IMDB"
 output: html_notebook
 ---
 
+TODO:
+
+* Set aside some films that you're interested in seeing the prediction and remove them from the dataset.
+
 ```{r}
 library(tidyverse)
 library(caret)
 library(tidytext)
 library(splitstackshape)
 library(xgboost)
-library(doParallel)
 library(rpart)
+library(doParallel)
 ```
 
 ```{r}
@@ -161,7 +165,11 @@ In Thrillers, Sport and Sci-Fi movies the score appears to be positively associa
 Ok, here's the idea. How well can you predict Metacritic scores of films that don't have a Metacritic score?
 
 ```{r}
-train <- data_genre %>% drop_na(Metascore) %>% spread(Genre, Genre) %>% select(-Description, -Title, -Rank, -Director)
+data_genre <- as.data.frame(data_genre)
+train <- sample_n(data_genre, nrow(data_genre))
+train <- data_genre %>% drop_na(Metascore) %>% spread(Genre, Genre) 
+titles_train <- train$Title
+train <- train %>% select(-Description, -Title, -Rank, -Director)
 
 genres <- train[, 7:27]
 
@@ -177,10 +185,8 @@ Ok, the director won't go there because if a new director comes up, they won't
 be properly regressed.
 
 ```{r}
-train_rand <- slice(train, sample(1:n()))
-
-train_x <- train_rand %>% select(-Metascore)
-train_y <- train_rand$Metascore
+train_x <- train %>% select(-Metascore)
+train_y <- train$Metascore
 ```
 
 Time to train the model.
@@ -197,19 +203,47 @@ train_x <- predict(pproc, train_x)
 train_x <- train_x %>% mutate_if(is.factor, as.character)
 train_x <- train_x %>% mutate_if(is.character, as.numeric)
 
+train_x_less <- train_x %>% select(-Score, -Vote, -Revenue)
+
 # Parallel computing setup
 workers <- makeCluster(detectCores(), type = "SOCK")
 registerDoParallel(workers)
 #stopImplicitCluster()
 
-xgb_model <- train(train_x, train_y,
+xgb_model <- train(train_x_less, train_y,
                     method = "xgbTree",
-                    tuneLength = 10,
-                    #verbose = T,
+                    tuneLength = 3,
+                    verbose = T,
                     trControl = trainControl(method = "cv", number = 10))
 
 xgb_model$results %>% arrange(MAE)
 ```
+How the hell is this model still this accurate? I stripped almost all features.
+
+```{r}
+pred <- predict(xgb_model, train_x_less)
+train_out <- train_x %>% mutate(title = titles_train, score = train$Score, metascore = train_y, predicted = pred) %>% select(title, metascore, predicted, score, everything())
+```
+
+```{r}
+train_out %>% arrange(desc(Year, predicted))
+```
+
+```{r}
+MAE(train_out$metascore, train_out$predicted)
+```
+
+
+```{r}
+train_y %>% qplot()
+```
+Jesus, the MAE of 11.39 is actually amazing. 
+
+```{r}
+varImp(xgb_model)
+```
+The number of votes is really indicative of the metascore. Interesting. 
+
 ```{r}
 # Getting the test data ready
 test <- data_genre[is.na(data_genre$Metascore),]
